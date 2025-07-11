@@ -9,10 +9,10 @@ This is a credit card statement or a shopping receipt that contains a lot of tra
 During the extraction process, the following requirements must be met:
 1. Dates should be in the format YYYY-MM-DD.
 2. For information that cannot be extracted, default it to "" (empty string).
-3. If the text to be extracted is not in English, it MUST firstly be translated into English. All output text MUST be in English.
-4. If it is a credit card statement: (1)Each line is considered a receipt, and its Transaction Date is the date for the entire receipt. (2)These receipts won't have detailed items. (3)When multiple currencies are present, the settlement currency or amount, which is CNY, should be considered.
-5. If it is a shopping receipt: (1)Each line is a receipt item. (2)If there is a discount, unitPrice stores the original unit price, and discountPrice stores the discounted unit price. Discount price <= unit price. (3)The default unit is "piece". (4) The sum of the quantity of each product multiplied by the discounted unit price MUST be equal to the total price of the receipt.
+3. If it is a credit card statement: (1)Each line is considered a receipt, and its Transaction Date is the date for the entire receipt. (2)These receipts won't have detailed items. (3)When multiple currencies are present, the settlement currency or amount, which is CNY, should be considered.
+4. If it is a shopping receipt: (1)Each line is a receipt item. (2) The sum of price MUST be equal to the total price of the receipt.
 
+Let's process the image and extract the information step by step. 
 """
 
 shopping_list_system_prompt = """
@@ -60,14 +60,11 @@ extract_receipt_function = {
                         "date",
                         "category",
                         "amount",
+                        "amount_currency",
                         "notes",
                         "details",
                     ],
                     "properties": {
-                        "id": {
-                            "type": ["string", "null"],
-                            "description": "unique identifier",
-                        },
                         "description": {
                             "type": "string",
                             "description": "overall description",
@@ -90,15 +87,11 @@ extract_receipt_function = {
                             "description": "category",
                         },
                         "amount": {"type": "number", "description": "total price"},
+                        "amount_currency": {
+                            "type": "string",
+                            "description": "currency of the total price. Default value is 'SEK'. It can be 'SEK', 'CNY', 'USD', etc.",
+                        },
                         "notes": {"type": ["string", "null"], "description": "notes"},
-                        # "fileName": {
-                        #     "type": ["string", "null"],
-                        #     "description": "name of the uploaded file",
-                        # },
-                        # "fileUrl": {
-                        #     "type": ["string", "null"],
-                        #     "description": "URL of the uploaded file",
-                        # },
                         "details": {
                             "type": ["array", "null"],
                             "description": "items in details",
@@ -106,38 +99,58 @@ extract_receipt_function = {
                                 "type": "object",
                                 "additionalProperties": False,
                                 "required": [
-                                    "id",
                                     "item",
+                                    "item_sv",
+                                    "item_en",
+                                    "item_zh",
                                     "quantity",
                                     "unit",
-                                    "unitPrice",
-                                    "discountPrice",
+                                    "unit_range_from",
+                                    "unit_range_to",
+                                    "price",
+                                    "ordinary_price",
                                     "notes",
                                 ],
                                 "properties": {
-                                    "id": {
-                                        "type": ["string", "null"],
-                                        "description": "unique identifier",
-                                    },
                                     "item": {
                                         "type": "string",
-                                        "description": "name of the item",
+                                        "description": "name of the item in the receipt",
+                                    },
+                                    "item_sv": {
+                                        "type": "string",
+                                        "description": "name of the item translated into swedish",
+                                    },
+                                    "item_en": {
+                                        "type": "string",
+                                        "description": "name of the item translated into english",
+                                    },
+                                    "item_zh": {
+                                        "type": "string",
+                                        "description": "name of the item translated into chinese",
                                     },
                                     "quantity": {
                                         "type": "number",
-                                        "description": "quantity",
+                                        "description": "quantity of the item",
                                     },
                                     "unit": {
                                         "type": "string",
-                                        "description": "unit. Default value is 'piece'",
+                                        "description": "unit of the item. Default value is 'piece'. It can be 'piece', 'kg', 'g', 'L', 'ml', etc.",
                                     },
-                                    "unitPrice": {
-                                        "type": "number",
-                                        "description": "price per unit",
+                                    "unit_range_from": {
+                                        "type": "string",
+                                        "description": "Sometimes the unit is a range, such as '100-200 g'. This field stores the lower bound of the range. The default value is 1.",
                                     },
-                                    "discountPrice": {
+                                    "unit_range_to": {
+                                        "type": "string",
+                                        "description": "Sometimes the unit is a range, such as '100-200 g'. This field stores the upper bound of the range. If it is not a range, it should be set to the same value as unit_range_from.",
+                                    },
+                                    "price": {
                                         "type": "number",
-                                        "description": "price per unit after discount",
+                                        "description": "total price of the receipt item",
+                                    },
+                                    "ordinary_price": {
+                                        "type": "number",
+                                        "description": "total price of the receipt item without discount",
                                     },
                                     "notes": {
                                         "type": ["string", "null"],
@@ -189,11 +202,6 @@ class OpenaiClient:
         self.thread = self.client.beta.threads.create()
 
     def gpt_4o_analyse_image_with_completion(self, image_url: str):
-        """
-        Data format:
-        - [id, description, date, category, amount, notes, fileName, fileUrl, details]
-        - details: [id, item, quantity, unit, unitPrice, discountPrice, notes]
-        """
         try:
             response = self.client.chat.completions.create(
                 model="gpt-4o-mini",
@@ -206,6 +214,7 @@ class OpenaiClient:
                                 "type": "image_url",
                                 "image_url": {
                                     "url": image_url,
+                                    "detail": "low",
                                 },
                             },
                         ],
@@ -245,6 +254,7 @@ class OpenaiClient:
                         "type": "image_url",
                         "image_url": {
                             "url": image_url,
+                            "detail": "low",
                         },
                     },
                 ],
